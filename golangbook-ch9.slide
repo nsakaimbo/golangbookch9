@@ -1,0 +1,265 @@
+Chapter 9
+Concurrency with Shared Variables
+
+* Race Conditions
+
+Incorrect result for some interleavings of multiple goroutines working together.
+
+    // Example: Bank Balance
+
+    package bank
+
+    var balance int
+
+    func Deposit(amount int) { balance = balance + amount }
+
+    func Balance() int { return balance }
+
+    // Balance and Deposit may not work correctly if called concurrently.
+
+* 
+
+We cannot predict the order in which these events happen.
+
+    // Example: Bank Balance (cont'd.)
+
+    // Alice
+    go func() {
+        bank.Deposit(200)                   // A1
+        fmt.Println("=", bank.Balance())    // A2
+    }()
+
+    // Bob
+    go bank.Deposit(100)                    // B
+
+.image golangbook_ch9_bank.png _ 800 
+
+
+: In all cases, the final balance is $300. 
+: The only variation is whether Alice's balance slip include's Bob's transaction (or not)
+: Do you think this list covers all possible outcomes?
+
+*  
+
+*But* a fourth outcome is possible (*data*race*).
+
+.image golangbook_ch9_bank_race.png  200 _ 
+
+- Alice's deposit is really _two_ sequential operations: (1) *read*: ... = balance + amount and (2) *write*: balance = ... 
+- Bob's deposit occurs _in_the_middle_ of Alice's deposit, _after_the_balance_is_read_but_before_it_is_updated_.
+- Bob's transaction will disappear! The final balance is $200 and the bank is richer.
+
+: "I just read an initial balance of 0, and I'm about to write $200 to this variable"
+
+* Data Race
+
+A data race occurs when: 
+
+1. two goroutines access the same variable conccurently, and
+2. at least one of the accesses is a write.
+
+*Bad*business*: if the variable is of a type larger than a single machine word, e.g. interface, string or slice, e.g.:
+
+    var x []int
+    go func() { x = make([]int, 10)} ()
+    go func() { x = make([]int, 1000000)} ()
+    x[999999] = 1 // NOTE: undefined behavior; memory corruption possible!
+
+- x in the final statement is *undefined*
+- Could be nil, slice of length 10, or slice of length 1,000,000
+
+: Three parts to a slice: (1) pointer, (2) (nominal) length and (3) capacity
+: If pointer comes from first call and length from the second, its nominal length would be 1,000,000 but underlying array has only 10 elements.
+: Storing to element 999,999 would clobber an arbitrary, faraway location in memory
+: Consequences are hard to predict, hard to debug and localize
+
+* Avoiding Data Races 
+
+Don't write the variable.
+
+.code avoid_variable_write.go /START1 OMIT/,/END1 OMIT/ 
+
+* Avoiding Data Races (cont'd) 
+
+Don't write the variable (cont'd).
+
+.code avoid_variable_write_2.go /START1 OMIT/,/END1 OMIT/ 
+
+Complete variable initialization before other goroutines access it (and never modify it again). 
+
+* Avoiding Data Races (cont'd) 
+
+Confine access to a single goroutine: "monitor goroutine".
+
+.code -numbers single_goroutine_bank.go /START1 OMIT/,/END1 OMIT/
+
+: Monitor goroutine: brokers access to a confined variable through channels
+: "Do not communicate by sharing memory; share memory by communicating."
+
+* Avoiding Data Races (cont'd)
+
+Confine access to a single goroutine: "serial confinement".
+
+.code -numbers serial_confinement.go /START OMIT/,/END OMIT/
+
+* Avoiding Data Races: Mutual Exclusion ("mutex")
+
+.code -numbers snippets.go /START1 OMIT/,/END1 OMIT/
+
+We can achieve this by using by the *sync.Mutex* type in Go.
+
+* Avoiding Data Races: sync.Mutex
+
+.code -numbers snippets.go /START2 OMIT/,/END2 OMIT/
+
+- *Critical*section*: region of code in which a goroutine can modify shared variables.
+
+* sync.Mutex
+
+- A goroutine will block until another goroutine calls `Unlock`!
+- Idiomatic to `Unlock` with `defer`
+
+    func Deposit(amount int) {
+        mu.Lock()
+        defer mu.Unlock()
+        balance = balance + amount
+    }
+
+- Go's mutexes are *non*re-entrant*: cannot lock once already locked!
+
+    func Withdraw(amount int) bool {
+        mu.Lock()
+        defer mu.Unlock()
+        Deposit(-amount) // 💩 Deadlock! Deposit also tries to acquire lock 
+        if Balance() < 0 {
+            Deposit(amount)
+            return false // insufficient funds
+        }
+        return true
+    }
+
+: Withdraw blocks forever!
+
+* sync.Mutex (cont'd)
+
+Example: Lock contention
+
+.play -edit blocked.go /START OMIT/,/END OMIT/
+
+* sync.Mutex (cont'd)
+
+Idiomatic to use exported/unexported pairwise methods.
+
+.code -numbers snippets.go /START3 OMIT/,/END3 OMIT/
+
+* sync.RWMutex: "Multiple Readers, Single Writer"
+
+Unnecessarily blocking on both reads and writes can be a performance penalty.
+
+ var mu sync.RWMutex
+ var balance int
+
+ func Balance() int {
+     mu.RLock() // reader's lock
+     defer mu.RUnlock()
+     return balance
+ }
+
+ func Deposit(amount int) {
+     mu.Lock() // writer's or exclusive lock
+     defer mu.Unlock()
+     balance = balance + amount
+ }
+
+- Balance requests can run in parallel (and finish more quickly)
+- Only use RWLock if critical section has no writes to shared variables
+- When in doubt, use an exclusive lock
+
+: Example: Bob is checking his balance every 100ms, so it blocks pending writes.
+
+* Memory Synchronization
+
+Concurrency is also machine (compiler and CPU) dependent.
+
+.code snippets.go /START4 OMIT/,/END4 OMIT/
+
+* Memory Synchronization (cont'd)
+
+- Multiple CPUs maintain their own buffer of writes to main memory. These buffers are commited to main memory when necessary.
+
+- If the two goroutines are executed on difference CPUs with their own cache, writes by one are invisible to the other. 
+
+- TLDR: Intuitions about concurrency are not to be trusted. Use established concurrency patterns!
+
+"Where possible, confine variables to a single goroutine; for all others, use mutual exclusion."
+
+* Lazy Initialization: sync.Once
+
+.code snippets.go /START5 OMIT/,/END5 OMIT/
+
+* Lazy Initialization: sync.Once (cont'd.)
+
+Conceptually, a `Once` is a mutex + boolean.
+
+    var loadIconsOnce sync.Once
+    var icons map[string]image.image
+
+    // Concurrency-safe
+    func Icon(name string) image.Image {
+        loadIconsOnce.Do(loadIcons)
+        return icons[name]
+    }
+
+    // Much better 👍🏼
+
+- Good practice: defer expensive initialization until needed
+- `Do` accepts the initialization function as its argument
+
+: Increases start-up latency and unecessary if execution does't always reach part of the program that uses the variable.
+
+* Race Detector
+
+- Use `-race` flag
+    go build -race
+    go run -race
+    go test -race
+
+- Highlights where a variable was written by one goroutine and read by another without a synchronization event
+
+.code snippets.go /START6 OMIT/,/END6 OMIT/
+
+[[https://golang.org/doc/articles/race_detector.html][Docs: Race Detector]]
+
+* Goroutines vs Threads
+
+Growable stacks, scheduling, identity and GOMAXPROCS.
+
+- OS thread stack is fixed-size (typically up to 2MB)
+- Goroutine is stack is small (typically 2KB), and _growable_ (up to 1GB)
+- OS threads are scheduled by the OS kernel, requiring a full (slow) context switch (i.e. swapping thread register state)
+- Go scheduler doesn't need to switch kernel context, much cheaper than OS rescheduling
+- Goroutines have no identity, which discourages the use of _thread_local_storage_ (global map keyed by id)
+- Goroutines are invoked by language constructs, not by a hardware timer.
+
+* GOMAXPROCS
+
+- The Go scheduler uses `GOMAXPROCS` environment variable to determine how many OS threads are available for multiplexing
+- You can explicitly override this parameter using GOMAXPROCS environment variable or `runtime.GOMAXPROCS` function
+- Example (YMMV):
+
+    for {
+        go fmt.Print(0)
+        fmt.Print(1)
+    }
+
+    $ GOMAXPROCS=1 go run hacker-cliché.go
+    1111111111111111111111111111000000000000000000000000001111111111111....
+
+    $ GOMAXPROCS=2 go run hacker-cliché.go
+    0101010101010101000110101010101010100110101101010101010101010011010....
+
+* Further Reading
+
+- *Ch*9.7*Example:*Concurrent*Non-Blocking*Cache*: memoizing a function with optimizations for concurrency.
+- Document: *The*Go*Memory*Model* (from Golang language spec): details on synchronization events captured by race detector.
+
