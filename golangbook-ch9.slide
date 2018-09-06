@@ -262,4 +262,5 @@ Growable stacks, scheduling, identity and GOMAXPROCS.
 
 - *Ch*9.7*Example:*Concurrent*Non-Blocking*Cache*: memoizing a function with optimizations for concurrency.
 - Document: *The*Go*Memory*Model* (from Golang language spec): details on synchronization events captured by race detector.
+- _Go_Training_ presentation: [[https://github.com/ardanlabs/gotraining/tree/master/topics/courses/go/concurrency]["Ultimate Go - Concurrency"]]
 
